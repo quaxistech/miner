@@ -1,10 +1,13 @@
 #include <algorithm>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <netdb.h>
+#include <stdexcept>
 #include <string>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <vector>
-
-#include <boost/asio.hpp>
 
 #include "json.hpp"
 #include "merkle.hpp"
@@ -12,19 +15,21 @@
 #include "nonce.hpp"
 
 using json = nlohmann::json;
-using boost::asio::ip::tcp;
 
 class StratumClient {
 public:
-    StratumClient(boost::asio::io_context& io_context, const std::string& host, const std::string& port)
-        : io_context_(io_context), socket_(io_context), resolver_(io_context), extranonce2_size_(4) {
-        auto endpoints = resolver_.resolve(host, port);
-        boost::asio::connect(socket_, endpoints);
+    StratumClient(const std::string& host, const std::string& port) : socket_fd_(-1), extranonce2_size_(4) {
+        connect_to_host(host, port);
         std::cout << "[ИНФО] Соединение установлено с " << host << ":" << port << std::endl;
     }
 
+    ~StratumClient() {
+        if (socket_fd_ >= 0) {
+            close(socket_fd_);
+        }
+    }
+
     void run() {
-        // Стандартный старт Stratum-сессии: подписка, затем чтение входящих сообщений.
         send_request("mining.subscribe", {"miner/1.0.0"});
         while (true) {
             read_response();
@@ -32,44 +37,52 @@ public:
     }
 
 private:
-    // ------------------------------------------------------------------------
-    // ВАЖНО: по требованию оставляем жёстко заданные параметры
-    // ------------------------------------------------------------------------
-    // FIXED_BLOCK_VERSION_DEC:
-    //   Жёстко заданная версия блока (десятичная форма), которая будет использоваться
-    //   вместо поля version из mining.notify.
-    // FIXED_NETWORK_DIFFICULTY:
-    //   Жёстко заданная сложность сети для дополнительной проверки hash<=target.
-    // ------------------------------------------------------------------------
     static constexpr uint32_t FIXED_BLOCK_VERSION_DEC = 1073733632;
     static constexpr double FIXED_NETWORK_DIFFICULTY = 146470000000000000.0;
 
-    boost::asio::io_context& io_context_;
-    tcp::socket socket_;
-    tcp::resolver resolver_;
+    int socket_fd_;
+    std::string read_buffer_;
 
-    // Данные Stratum-сессии.
     std::string extranonce1_;
     int extranonce2_size_;
-
-    // Чтобы не терять контекст пула, всё равно запоминаем присланную сложность,
-    // но в целевой проверке используем фиксированную сложность согласно требованию.
     double last_pool_difficulty_ = 0.0;
 
-    // ------------------------------------------------------------------------
-    // parse_hex_field_le
-    // ------------------------------------------------------------------------
-    // Stratum обычно передаёт числовые поля в hex-строке в «читаемом» big-endian,
-    // тогда как в заголовке Bitcoin многие поля хранятся little-endian.
-    // Эта функция переводит hex-строку в байты и разворачивает порядок байтов.
-    // ------------------------------------------------------------------------
+    void connect_to_host(const std::string& host, const std::string& port) {
+        struct addrinfo hints {};
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+
+        struct addrinfo* result = nullptr;
+        int rc = getaddrinfo(host.c_str(), port.c_str(), &hints, &result);
+        if (rc != 0) {
+            throw std::runtime_error(std::string("getaddrinfo failed: ") + gai_strerror(rc));
+        }
+
+        for (struct addrinfo* rp = result; rp != nullptr; rp = rp->ai_next) {
+            int fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+            if (fd < 0) {
+                continue;
+            }
+            if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
+                socket_fd_ = fd;
+                break;
+            }
+            close(fd);
+        }
+
+        freeaddrinfo(result);
+
+        if (socket_fd_ < 0) {
+            throw std::runtime_error("Не удалось подключиться к серверу");
+        }
+    }
+
     static std::vector<unsigned char> parse_hex_field_le(const std::string& hex) {
         auto bytes = MerkleCalculator::hex_to_bytes(hex);
         std::reverse(bytes.begin(), bytes.end());
         return bytes;
     }
 
-    // Утилита печати байтов в HEX-форме для максимально подробного вывода.
     static void print_hex_bytes(const std::string& label, const std::vector<unsigned char>& bytes) {
         std::cout << label << " (" << bytes.size() << " байт): ";
         std::cout << NonceCalculator::bytes_to_hex(bytes) << std::endl;
@@ -80,16 +93,30 @@ private:
         json request = {{"id", id_counter++}, {"method", method}, {"params", params}};
 
         std::string request_str = request.dump() + "\n";
-        boost::asio::write(socket_, boost::asio::buffer(request_str));
+        ssize_t sent = send(socket_fd_, request_str.data(), request_str.size(), 0);
+        if (sent < 0 || static_cast<size_t>(sent) != request_str.size()) {
+            throw std::runtime_error("Ошибка отправки данных");
+        }
         std::cout << "[ОТПРАВЛЕНО] -> " << request_str;
     }
 
     void read_response() {
-        boost::asio::streambuf response_buffer;
-        boost::asio::read_until(socket_, response_buffer, "\n");
-        std::istream is(&response_buffer);
         std::string line;
-        std::getline(is, line);
+        while (true) {
+            size_t pos = read_buffer_.find('\n');
+            if (pos != std::string::npos) {
+                line = read_buffer_.substr(0, pos);
+                read_buffer_.erase(0, pos + 1);
+                break;
+            }
+
+            char buf[4096];
+            ssize_t n = recv(socket_fd_, buf, sizeof(buf), 0);
+            if (n <= 0) {
+                throw std::runtime_error("Соединение закрыто или ошибка чтения");
+            }
+            read_buffer_.append(buf, static_cast<size_t>(n));
+        }
 
         if (line.empty()) return;
 
@@ -178,7 +205,6 @@ private:
             return;
         }
 
-        // Шаг 1. Построение Merkle Root по правилам Stratum V1.
         std::vector<std::string> branch;
         for (const auto& item : merkle_branch_json) {
             branch.push_back(item.get<std::string>());
@@ -192,24 +218,17 @@ private:
         std::cout << "[COINBASE] extranonce2 (фиксировано нулями): " << extranonce2 << std::endl;
         std::cout << "[MERKLE] root (внутренний порядок байтов): " << merkle_root << std::endl;
 
-        // Шаг 2. Сборка 80-байтного заголовка Bitcoin (с жёсткой версией).
         std::vector<unsigned char> header;
         header.reserve(80);
 
-        // Версия: именно фиксированное число, little-endian в заголовке.
         std::vector<unsigned char> version_le = {
             static_cast<unsigned char>((FIXED_BLOCK_VERSION_DEC >> 0) & 0xff),
             static_cast<unsigned char>((FIXED_BLOCK_VERSION_DEC >> 8) & 0xff),
             static_cast<unsigned char>((FIXED_BLOCK_VERSION_DEC >> 16) & 0xff),
             static_cast<unsigned char>((FIXED_BLOCK_VERSION_DEC >> 24) & 0xff)};
 
-        // prevhash приходит как «читаемый» hex, для заголовка нужен little-endian порядок.
         auto prevhash_le = parse_hex_field_le(prevhash);
-
-        // merkle_root уже возвращается как внутренний (подходящий для заголовка) порядок байтов.
         auto merkle_root_internal = MerkleCalculator::hex_to_bytes(merkle_root);
-
-        // ntime/nbits в заголовок тоже кладём little-endian.
         auto ntime_le = parse_hex_field_le(ntime);
         auto nbits_le = parse_hex_field_le(nbits);
 
@@ -219,7 +238,6 @@ private:
         header.insert(header.end(), ntime_le.begin(), ntime_le.end());
         header.insert(header.end(), nbits_le.begin(), nbits_le.end());
 
-        // Nonce для демонстрационной проверки оставляем 0 (LE).
         const uint32_t nonce = 0;
         header.push_back(static_cast<unsigned char>((nonce >> 0) & 0xff));
         header.push_back(static_cast<unsigned char>((nonce >> 8) & 0xff));
@@ -231,7 +249,6 @@ private:
             return;
         }
 
-        // Максимально подробный вывод всех промежуточных полей.
         print_hex_bytes("[HEADER] version_le", version_le);
         print_hex_bytes("[HEADER] prevhash_le", prevhash_le);
         print_hex_bytes("[HEADER] merkle_root_internal", merkle_root_internal);
@@ -239,24 +256,19 @@ private:
         print_hex_bytes("[HEADER] nbits_le", nbits_le);
         print_hex_bytes("[HEADER] full_80_bytes", header);
 
-        // Шаг 3. Midstate (первые 64 байта), как обычно используют майнеры/ASIC pipeline.
         std::vector<unsigned char> first_chunk(header.begin(), header.begin() + 64);
         auto midstate = MidstateCalculator::calculate_midstate(first_chunk);
 
-        // Шаг 4. Полный SHA256d заголовка.
         auto hash_be = NonceCalculator::dsha256(header);
         std::vector<unsigned char> hash_le = hash_be;
         std::reverse(hash_le.begin(), hash_le.end());
 
-        // Шаг 5а. Эталонный target из nBits (канонически для блока).
         auto target_from_nbits = NonceCalculator::target_from_compact(nbits);
         bool valid_vs_nbits = NonceCalculator::hash_meets_target(hash_be, target_from_nbits);
 
-        // Шаг 5б. Дополнительный target из жёстко заданной сложности (по вашему требованию).
         auto target_from_fixed_diff = NonceCalculator::target_from_difficulty(FIXED_NETWORK_DIFFICULTY);
         bool valid_vs_fixed_diff = NonceCalculator::hash_meets_target(hash_be, target_from_fixed_diff);
 
-        // Подробнейший финальный отчёт.
         std::cout << "[MIDSTATE] " << midstate.to_hex() << std::endl;
         std::cout << "[HASH big-endian] " << NonceCalculator::bytes_to_hex(hash_be) << std::endl;
         std::cout << "[HASH little-endian/display] " << NonceCalculator::bytes_to_hex(hash_le) << std::endl;
@@ -286,8 +298,7 @@ int main(int argc, char* argv[]) {
     if (argc > 2) port = argv[2];
 
     try {
-        boost::asio::io_context io_context;
-        StratumClient client(io_context, host, port);
+        StratumClient client(host, port);
         client.run();
     } catch (const std::exception& e) {
         std::cerr << "Exception: " << e.what() << std::endl;

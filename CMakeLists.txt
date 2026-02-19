@@ -4,8 +4,6 @@ project(stratum_client CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Проверка наличия Boost (Asio)
-find_package(Boost REQUIRED)
 
 # FetchContent удален, так как json.hpp есть локально
 # include(FetchContent)
@@ -23,4 +21,4 @@ add_executable(stratum_client main.cpp)
 # Подключение директорий при необходимости
 find_package(OpenSSL REQUIRED)
 target_include_directories(stratum_client PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${OPENSSL_INCLUDE_DIR})
-target_link_libraries(stratum_client PRIVATE Boost::boost OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(stratum_client PRIVATE OpenSSL::SSL OpenSSL::Crypto)
