@@ -263,6 +263,8 @@ private:
         std::cout << "[TARGET from nBits] " << NonceCalculator::bytes_to_hex(target_from_nbits) << std::endl;
         std::cout << "[TARGET CHECK nBits] "
                   << (valid_vs_nbits ? "PASS (hash <= target)" : "FAIL (hash > target)") << std::endl;
+        std::cout << "[COMPARE nBits] hash=" << NonceCalculator::bytes_to_hex(hash_be)
+                  << " VS target=" << NonceCalculator::bytes_to_hex(target_from_nbits) << std::endl;
 
         std::cout << "[FIXED VERSION DEC] " << FIXED_BLOCK_VERSION_DEC << std::endl;
         std::cout << "[FIXED DIFFICULTY] " << std::fixed << std::setprecision(0) << FIXED_NETWORK_DIFFICULTY
@@ -271,6 +273,8 @@ private:
                   << std::endl;
         std::cout << "[TARGET CHECK fixed difficulty] "
                   << (valid_vs_fixed_diff ? "PASS (hash <= target)" : "FAIL (hash > target)") << std::endl;
+        std::cout << "[COMPARE fixed difficulty] hash=" << NonceCalculator::bytes_to_hex(hash_be)
+                  << " VS target=" << NonceCalculator::bytes_to_hex(target_from_fixed_diff) << std::endl;
     }
 };
 
