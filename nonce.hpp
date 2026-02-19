@@ -2,8 +2,8 @@
 #define NONCE_HPP
 
 #include <array>
-#include <boost/multiprecision/cpp_dec_float.hpp>
-#include <boost/multiprecision/cpp_int.hpp>
+#include <openssl/bn.h>
+#include <cmath>
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
@@ -67,16 +67,33 @@ public:
             throw std::runtime_error("Negative compact target is invalid");
         }
 
-        using boost::multiprecision::cpp_int;
-        cpp_int target = mantissa;
-
-        if (exponent > 3) {
-            target <<= (8 * (exponent - 3));
-        } else {
-            target >>= (8 * (3 - exponent));
+        std::array<unsigned char, 32> out{};
+        if (mantissa == 0) {
+            return out;
         }
 
-        return cpp_int_to_32bytes_be(target);
+        unsigned char m[3] = {
+            static_cast<unsigned char>((mantissa >> 16) & 0xff),
+            static_cast<unsigned char>((mantissa >> 8) & 0xff),
+            static_cast<unsigned char>(mantissa & 0xff)};
+
+        if (exponent <= 3) {
+            uint32_t shifted = mantissa >> (8 * (3 - exponent));
+            out[29] = static_cast<unsigned char>((shifted >> 16) & 0xff);
+            out[30] = static_cast<unsigned char>((shifted >> 8) & 0xff);
+            out[31] = static_cast<unsigned char>(shifted & 0xff);
+            return out;
+        }
+
+        int idx = static_cast<int>(32 - exponent);
+        if (idx < 0 || idx + 2 >= 32) {
+            throw std::runtime_error("Compact target overflow for 256-bit range");
+        }
+
+        out[idx] = m[0];
+        out[idx + 1] = m[1];
+        out[idx + 2] = m[2];
+        return out;
     }
 
     static std::array<unsigned char, 32> target_from_difficulty(double difficulty) {
@@ -84,16 +101,41 @@ public:
             throw std::runtime_error("Difficulty must be positive");
         }
 
-        using boost::multiprecision::cpp_dec_float_100;
-        using boost::multiprecision::cpp_int;
+        BIGNUM* diff1 = BN_new();
+        BIGNUM* target = BN_new();
+        BIGNUM* denom = BN_new();
+        BN_CTX* ctx = BN_CTX_new();
+        if (!diff1 || !target || !denom || !ctx) {
+            BN_free(diff1);
+            BN_free(target);
+            BN_free(denom);
+            BN_CTX_free(ctx);
+            throw std::runtime_error("OpenSSL BN allocation failure");
+        }
 
-        const cpp_int diff1_target = (cpp_int(0x00ffff) << (8 * (0x1d - 3)));
+        BN_set_word(diff1, 0x00ffff);
+        BN_lshift(diff1, diff1, 8 * (0x1d - 3));
 
-        cpp_dec_float_100 diff = cpp_dec_float_100(difficulty);
-        cpp_dec_float_100 scaled = cpp_dec_float_100(diff1_target) / diff;
-        cpp_int target = static_cast<cpp_int>(scaled);
+        double int_part = 0.0;
+        double frac = std::modf(difficulty, &int_part);
+        (void)frac;
+        if (int_part < 1.0) {
+            int_part = 1.0;
+        }
 
-        return cpp_int_to_32bytes_be(target);
+        unsigned long long denom_word = static_cast<unsigned long long>(int_part);
+        if (denom_word == 0) denom_word = 1;
+        BN_set_word(denom, static_cast<BN_ULONG>(denom_word));
+
+        BN_div(target, nullptr, diff1, denom, ctx);
+
+        auto out = bn_to_32bytes_be(target);
+
+        BN_free(diff1);
+        BN_free(target);
+        BN_free(denom);
+        BN_CTX_free(ctx);
+        return out;
     }
 
     static bool hash_meets_target(const std::vector<unsigned char>& hash_be,
@@ -275,21 +317,16 @@ private:
         ss << std::hex << std::setw(8) << std::setfill('0') << v;
         return ss.str();
     }
-
-    static std::array<unsigned char, 32> cpp_int_to_32bytes_be(boost::multiprecision::cpp_int value) {
-        if (value < 0) {
-            throw std::runtime_error("Target cannot be negative");
-        }
-        return ss.str();
-    }
-
+    static std::array<unsigned char, 32> bn_to_32bytes_be(const BIGNUM* bn) {
         std::array<unsigned char, 32> out{};
-        for (int i = 31; i >= 0 && value > 0; --i) {
-            out[i] = static_cast<unsigned char>(value & 0xff);
-            value >>= 8;
+        int n = BN_num_bytes(bn);
+        if (n > 32) {
+            throw std::runtime_error("Target overflow: more than 256 bits");
         }
+        BN_bn2bin(bn, out.data() + (32 - n));
         return out;
     }
+
 };
 
 #endif // NONCE_HPP
