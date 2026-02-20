@@ -259,7 +259,7 @@ private:
         std::vector<unsigned char> first_chunk(header.begin(), header.begin() + 64);
         auto midstate = MidstateCalculator::calculate_midstate(first_chunk);
 
-        auto hash_be = NonceCalculator::dsha256(header);
+        auto hash_be = NonceCalculator::dsha256(header, &midstate);
         std::vector<unsigned char> hash_le = hash_be;
         std::reverse(hash_le.begin(), hash_le.end());
 

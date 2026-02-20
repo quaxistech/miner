@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include "midstate.hpp"
+
 // ============================================================================
 // NonceCalculator
 // ----------------------------------------------------------------------------
@@ -42,11 +44,18 @@ public:
     // 2) SHA256(hash1)
     // На каждом раунде каждого блока печатаются значения регистров a..h.
     // ------------------------------------------------------------------------
-    static std::vector<unsigned char> dsha256(const std::vector<unsigned char>& data) {
+    static std::vector<unsigned char> dsha256(
+        const std::vector<unsigned char>& data,
+        const MidstateCalculator::SHA256State* precomputed_midstate = nullptr) {
         std::cout << "\n================ SHA256d: НАЧАЛО ================\n";
         std::cout << "[SHA256d] Входные данные (" << data.size() << " байт): " << bytes_to_hex(data) << "\n";
 
-        std::vector<unsigned char> hash1 = sha256_verbose(data, "SHA256#1");
+        std::vector<unsigned char> hash1;
+        if (precomputed_midstate != nullptr && data.size() == 80) {
+            hash1 = sha256_verbose_second_block_with_midstate(data, *precomputed_midstate, "SHA256#1");
+        } else {
+            hash1 = sha256_verbose(data, "SHA256#1");
+        }
         std::vector<unsigned char> hash2 = sha256_verbose(hash1, "SHA256#2");
 
         std::cout << "[SHA256d] Итоговый hash2 (BE): " << bytes_to_hex(hash2) << "\n";
@@ -276,6 +285,119 @@ private:
             std::cout << "[" << stage_name << "] После блока #" << block_index << ": "
                       << regs_to_string(h0, h1, h2, h3, h4, h5, h6, h7) << "\n";
         }
+
+        std::vector<unsigned char> digest(32);
+        write_u32_be(digest, 0, h0);
+        write_u32_be(digest, 4, h1);
+        write_u32_be(digest, 8, h2);
+        write_u32_be(digest, 12, h3);
+        write_u32_be(digest, 16, h4);
+        write_u32_be(digest, 20, h5);
+        write_u32_be(digest, 24, h6);
+        write_u32_be(digest, 28, h7);
+
+        std::cout << "[" << stage_name << "] Итоговый digest (BE): " << bytes_to_hex(digest) << "\n";
+        return digest;
+    }
+
+    static std::vector<unsigned char> sha256_verbose_second_block_with_midstate(
+        const std::vector<unsigned char>& header80,
+        const MidstateCalculator::SHA256State& midstate,
+        const std::string& stage_name) {
+        std::cout << "[" << stage_name << "] Вход (" << header80.size() << " байт): " << bytes_to_hex(header80)
+                  << "\n";
+
+        std::vector<unsigned char> block2(header80.begin() + 64, header80.end());
+        block2.push_back(0x80);
+        while (block2.size() < 56) {
+            block2.push_back(0x00);
+        }
+        const uint64_t bit_len = static_cast<uint64_t>(header80.size()) * 8;
+        for (int i = 7; i >= 0; --i) {
+            block2.push_back(static_cast<unsigned char>((bit_len >> (i * 8)) & 0xff));
+        }
+
+        std::vector<unsigned char> padded = header80;
+        padded.insert(padded.end(), block2.begin(), block2.end());
+
+        std::cout << "[" << stage_name << "] После паддинга (" << padded.size() << " байт): "
+                  << bytes_to_hex(padded) << "\n";
+        std::cout << "[" << stage_name << "] Используется готовый midstate, блок #0 пропущен.\n";
+        std::cout << "[" << stage_name << "] Блок #1 (64 байта): " << bytes_to_hex(block2) << "\n";
+
+        uint32_t w[64] = {0};
+        for (int i = 0; i < 16; ++i) {
+            w[i] = (static_cast<uint32_t>(block2[i * 4]) << 24) |
+                   (static_cast<uint32_t>(block2[i * 4 + 1]) << 16) |
+                   (static_cast<uint32_t>(block2[i * 4 + 2]) << 8) |
+                   static_cast<uint32_t>(block2[i * 4 + 3]);
+        }
+        for (int i = 16; i < 64; ++i) {
+            w[i] = small_sigma1(w[i - 2]) + w[i - 7] + small_sigma0(w[i - 15]) + w[i - 16];
+        }
+
+        std::cout << "[" << stage_name << "] W[0..63] для блока #1:\n";
+        for (int i = 0; i < 64; ++i) {
+            std::cout << "  W[" << std::setw(2) << std::setfill('0') << i << "]="
+                      << std::hex << std::setw(8) << std::setfill('0') << w[i] << std::dec;
+            if ((i + 1) % 4 == 0)
+                std::cout << "\n";
+            else
+                std::cout << "  ";
+        }
+
+        uint32_t h0 = midstate.h[0];
+        uint32_t h1 = midstate.h[1];
+        uint32_t h2 = midstate.h[2];
+        uint32_t h3 = midstate.h[3];
+        uint32_t h4 = midstate.h[4];
+        uint32_t h5 = midstate.h[5];
+        uint32_t h6 = midstate.h[6];
+        uint32_t h7 = midstate.h[7];
+
+        uint32_t a = h0;
+        uint32_t b = h1;
+        uint32_t c = h2;
+        uint32_t d = h3;
+        uint32_t e = h4;
+        uint32_t f = h5;
+        uint32_t g = h6;
+        uint32_t h = h7;
+
+        std::cout << "[" << stage_name << "] Старт регистров блока #1 (из midstate): "
+                  << regs_to_string(a, b, c, d, e, f, g, h) << "\n";
+
+        for (int i = 0; i < 64; ++i) {
+            uint32_t t1 = h + big_sigma1(e) + ch(e, f, g) + K[i] + w[i];
+            uint32_t t2 = big_sigma0(a) + maj(a, b, c);
+
+            h = g;
+            g = f;
+            f = e;
+            e = d + t1;
+            d = c;
+            c = b;
+            b = a;
+            a = t1 + t2;
+
+            std::cout << "[" << stage_name << "] Блок #1, раунд "
+                      << std::setw(2) << std::setfill('0') << i
+                      << " | T1=" << std::hex << std::setw(8) << std::setfill('0') << t1
+                      << " T2=" << std::setw(8) << t2 << std::dec
+                      << " | " << regs_to_string(a, b, c, d, e, f, g, h) << "\n";
+        }
+
+        h0 += a;
+        h1 += b;
+        h2 += c;
+        h3 += d;
+        h4 += e;
+        h5 += f;
+        h6 += g;
+        h7 += h;
+
+        std::cout << "[" << stage_name << "] После блока #1: "
+                  << regs_to_string(h0, h1, h2, h3, h4, h5, h6, h7) << "\n";
 
         std::vector<unsigned char> digest(32);
         write_u32_be(digest, 0, h0);
