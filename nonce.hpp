@@ -48,6 +48,7 @@ public:
         const std::vector<unsigned char>& data,
         const MidstateCalculator::SHA256State* precomputed_midstate = nullptr) {
         std::cout << "\n================ SHA256d: НАЧАЛО ================\n";
+        std::cout << "[SHA256d] Формула: SHA256d = SHA256(SHA256(header)). Ровно ДВА SHA-256, не три.\n";
         std::cout << "[SHA256d] Входные данные (" << data.size() << " байт): " << bytes_to_hex(data) << "\n";
 
         std::vector<unsigned char> hash1;
@@ -56,6 +57,8 @@ public:
         } else {
             hash1 = sha256_verbose(data, "SHA256#1");
         }
+        std::cout << "[SHA256d] Переход к SHA256#2 (второй и последний SHA-256 в SHA256d). Это НЕ третий хеш.\n";
+        std::cout << "[SHA256d] У SHA256#2 вход 32 байта, поэтому после паддинга всегда один 64-байтный блок (#0 этого этапа).\n";
         std::vector<unsigned char> hash2 = sha256_verbose(hash1, "SHA256#2");
 
         std::cout << "[SHA256d] Итоговый hash2 (BE): " << bytes_to_hex(hash2) << "\n";
@@ -106,43 +109,62 @@ public:
     }
 
     static std::array<unsigned char, 32> target_from_difficulty(double difficulty) {
-        if (difficulty <= 0.0) {
-            throw std::runtime_error("Difficulty must be positive");
+        if (difficulty <= 0.0 || !std::isfinite(difficulty)) {
+            throw std::runtime_error("Difficulty must be finite and positive");
         }
 
         BIGNUM* diff1 = BN_new();
         BIGNUM* target = BN_new();
         BIGNUM* denom = BN_new();
+        BIGNUM* scale = BN_new();
         BN_CTX* ctx = BN_CTX_new();
-        if (!diff1 || !target || !denom || !ctx) {
+        if (!diff1 || !target || !denom || !scale || !ctx) {
             BN_free(diff1);
             BN_free(target);
             BN_free(denom);
+            BN_free(scale);
             BN_CTX_free(ctx);
             throw std::runtime_error("OpenSSL BN allocation failure");
         }
 
+        // diff1 target (difficulty 1): 0x00000000FFFF0000... (Bitcoin consensus baseline)
         BN_set_word(diff1, 0x00ffff);
         BN_lshift(diff1, diff1, 8 * (0x1d - 3));
 
-        double int_part = 0.0;
-        double frac = std::modf(difficulty, &int_part);
-        (void)frac;
-        if (int_part < 1.0) {
-            int_part = 1.0;
+        // Convert floating difficulty to fixed-point integer with 1e12 precision:
+        // target = diff1 / difficulty ~= (diff1 * 1e12) / round(difficulty * 1e12)
+        constexpr uint64_t SCALE_DEC = 1000000000000ULL;
+        long double scaled_ld = static_cast<long double>(difficulty) * static_cast<long double>(SCALE_DEC);
+        uint64_t scaled_int = static_cast<uint64_t>(scaled_ld + 0.5L);
+        if (scaled_int == 0) scaled_int = 1;
+
+        BN_set_word(scale, static_cast<BN_ULONG>(SCALE_DEC));
+        BN_set_word(denom, static_cast<BN_ULONG>(scaled_int));
+
+        if (!BN_mul(diff1, diff1, scale, ctx)) {
+            BN_free(diff1);
+            BN_free(target);
+            BN_free(denom);
+            BN_free(scale);
+            BN_CTX_free(ctx);
+            throw std::runtime_error("OpenSSL BN_mul failed");
         }
 
-        unsigned long long denom_word = static_cast<unsigned long long>(int_part);
-        if (denom_word == 0) denom_word = 1;
-        BN_set_word(denom, static_cast<BN_ULONG>(denom_word));
-
-        BN_div(target, nullptr, diff1, denom, ctx);
+        if (!BN_div(target, nullptr, diff1, denom, ctx)) {
+            BN_free(diff1);
+            BN_free(target);
+            BN_free(denom);
+            BN_free(scale);
+            BN_CTX_free(ctx);
+            throw std::runtime_error("OpenSSL BN_div failed");
+        }
 
         auto out = bn_to_32bytes_be(target);
 
         BN_free(diff1);
         BN_free(target);
         BN_free(denom);
+        BN_free(scale);
         BN_CTX_free(ctx);
         return out;
     }
@@ -153,9 +175,14 @@ public:
             throw std::runtime_error("Hash must be 32 bytes");
         }
 
+        // Bitcoin compares hash as little-endian integer to target.
+        // hash_be is the raw SHA256 output bytes (big-endian style digest),
+        // so compare from the tail to emulate LE numeric comparison.
         for (size_t i = 0; i < 32; ++i) {
-            if (hash_be[i] < target_be[i]) return true;
-            if (hash_be[i] > target_be[i]) return false;
+            const unsigned char h = hash_be[31 - i];
+            const unsigned char t = target_be[31 - i];
+            if (h < t) return true;
+            if (h > t) return false;
         }
         return true;
     }
@@ -297,6 +324,9 @@ private:
         write_u32_be(digest, 28, h7);
 
         std::cout << "[" << stage_name << "] Итоговый digest (BE): " << bytes_to_hex(digest) << "\n";
+        if (stage_name == "SHA256#1") {
+            std::cout << "[" << stage_name << "] Это конец ПЕРВОГО SHA-256. Далее по Bitcoin PoW обязателен ВТОРОЙ SHA-256.\n";
+        }
         return digest;
     }
 
@@ -322,7 +352,7 @@ private:
 
         std::cout << "[" << stage_name << "] После паддинга (" << padded.size() << " байт): "
                   << bytes_to_hex(padded) << "\n";
-        std::cout << "[" << stage_name << "] Используется готовый midstate, блок #0 пропущен.\n";
+        std::cout << "[" << stage_name << "] Используется готовый midstate: в SHA256#1 первый 64-байтный блок (#0) уже посчитан, поэтому считаем только блок #1.\n";
         std::cout << "[" << stage_name << "] Блок #1 (64 байта): " << bytes_to_hex(block2) << "\n";
 
         uint32_t w[64] = {0};
@@ -398,6 +428,7 @@ private:
 
         std::cout << "[" << stage_name << "] После блока #1: "
                   << regs_to_string(h0, h1, h2, h3, h4, h5, h6, h7) << "\n";
+        std::cout << "[" << stage_name << "] Это конец ПЕРВОГО SHA-256 (с midstate). Следом идёт только SHA256#2.\n";
 
         std::vector<unsigned char> digest(32);
         write_u32_be(digest, 0, h0);
