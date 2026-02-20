@@ -119,6 +119,12 @@ public:
                       << " | " << regs_to_string(a, b, c, d, e, f, g, h) << "\n";
         }
 
+
+        std::cout << "[MIDSTATE] После раунда 63 (рабочие a..h до feed-forward): "
+                  << regs_to_string(a, b, c, d, e, f, g, h) << "\n";
+        std::cout << "[MIDSTATE] ВАЖНО: итог SHA-256 блока = (начальное state) + (рабочие a..h) по mod 2^32,\n"
+                  << "           поэтому значения после раунда 63 обычно НЕ равны итоговому состоянию.\n";
+
         SHA256State out{};
         out.h[0] = state[0] + a;
         out.h[1] = state[1] + b;
@@ -129,6 +135,15 @@ public:
         out.h[6] = state[6] + g;
         out.h[7] = state[7] + h;
 
+        std::cout << "[MIDSTATE] Feed-forward по словам:\n";
+        std::cout << "  H0=" << hex32(state[0]) << " + " << hex32(a) << " = " << hex32(out.h[0]) << "\n";
+        std::cout << "  H1=" << hex32(state[1]) << " + " << hex32(b) << " = " << hex32(out.h[1]) << "\n";
+        std::cout << "  H2=" << hex32(state[2]) << " + " << hex32(c) << " = " << hex32(out.h[2]) << "\n";
+        std::cout << "  H3=" << hex32(state[3]) << " + " << hex32(d) << " = " << hex32(out.h[3]) << "\n";
+        std::cout << "  H4=" << hex32(state[4]) << " + " << hex32(e) << " = " << hex32(out.h[4]) << "\n";
+        std::cout << "  H5=" << hex32(state[5]) << " + " << hex32(f) << " = " << hex32(out.h[5]) << "\n";
+        std::cout << "  H6=" << hex32(state[6]) << " + " << hex32(g) << " = " << hex32(out.h[6]) << "\n";
+        std::cout << "  H7=" << hex32(state[7]) << " + " << hex32(h) << " = " << hex32(out.h[7]) << "\n";
         std::cout << "[MIDSTATE] Итоговое состояние (BE words): " << out.to_hex() << "\n";
         std::cout << "[MIDSTATE] ===== КОНЕЦ РАСЧЁТА MIDSTATE =====\n\n";
 

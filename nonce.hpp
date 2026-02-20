@@ -48,6 +48,7 @@ public:
         const std::vector<unsigned char>& data,
         const MidstateCalculator::SHA256State* precomputed_midstate = nullptr) {
         std::cout << "\n================ SHA256d: НАЧАЛО ================\n";
+        std::cout << "[SHA256d] Формула: SHA256d = SHA256(SHA256(header)). Ровно ДВА SHA-256, не три.\n";
         std::cout << "[SHA256d] Входные данные (" << data.size() << " байт): " << bytes_to_hex(data) << "\n";
 
         std::vector<unsigned char> hash1;
@@ -56,7 +57,8 @@ public:
         } else {
             hash1 = sha256_verbose(data, "SHA256#1");
         }
-        std::cout << "[SHA256d] Переход к SHA256#2: это отдельный второй хеш от 32-байтного SHA256#1, поэтому здесь снова есть свой блок #0.\n";
+        std::cout << "[SHA256d] Переход к SHA256#2 (второй и последний SHA-256 в SHA256d). Это НЕ третий хеш.\n";
+        std::cout << "[SHA256d] У SHA256#2 вход 32 байта, поэтому после паддинга всегда один 64-байтный блок (#0 этого этапа).\n";
         std::vector<unsigned char> hash2 = sha256_verbose(hash1, "SHA256#2");
 
         std::cout << "[SHA256d] Итоговый hash2 (BE): " << bytes_to_hex(hash2) << "\n";
@@ -322,6 +324,9 @@ private:
         write_u32_be(digest, 28, h7);
 
         std::cout << "[" << stage_name << "] Итоговый digest (BE): " << bytes_to_hex(digest) << "\n";
+        if (stage_name == "SHA256#1") {
+            std::cout << "[" << stage_name << "] Это конец ПЕРВОГО SHA-256. Далее по Bitcoin PoW обязателен ВТОРОЙ SHA-256.\n";
+        }
         return digest;
     }
 
@@ -423,6 +428,7 @@ private:
 
         std::cout << "[" << stage_name << "] После блока #1: "
                   << regs_to_string(h0, h1, h2, h3, h4, h5, h6, h7) << "\n";
+        std::cout << "[" << stage_name << "] Это конец ПЕРВОГО SHA-256 (с midstate). Следом идёт только SHA256#2.\n";
 
         std::vector<unsigned char> digest(32);
         write_u32_be(digest, 0, h0);
