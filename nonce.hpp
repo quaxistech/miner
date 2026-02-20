@@ -347,11 +347,21 @@ private:
             block2.push_back(static_cast<unsigned char>((bit_len >> (i * 8)) & 0xff));
         }
 
-        std::vector<unsigned char> padded = header80;
-        padded.insert(padded.end(), block2.begin(), block2.end());
+        if (block2.size() != 64) {
+            throw std::runtime_error("Внутренняя ошибка: второй блок SHA-256 должен быть ровно 64 байта");
+        }
 
-        std::cout << "[" << stage_name << "] После паддинга (" << padded.size() << " байт): "
-                  << bytes_to_hex(padded) << "\n";
+        std::vector<unsigned char> padded_full(header80);
+        padded_full.push_back(0x80);
+        while ((padded_full.size() % 64) != 56) {
+            padded_full.push_back(0x00);
+        }
+        for (int i = 7; i >= 0; --i) {
+            padded_full.push_back(static_cast<unsigned char>((bit_len >> (i * 8)) & 0xff));
+        }
+
+        std::cout << "[" << stage_name << "] После паддинга (" << padded_full.size() << " байт): "
+                  << bytes_to_hex(padded_full) << "\n";
         std::cout << "[" << stage_name << "] Используется готовый midstate: в SHA256#1 первый 64-байтный блок (#0) уже посчитан, поэтому считаем только блок #1.\n";
         std::cout << "[" << stage_name << "] Блок #1 (64 байта): " << bytes_to_hex(block2) << "\n";
 
