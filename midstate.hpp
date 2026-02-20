@@ -1,45 +1,54 @@
 #ifndef MIDSTATE_HPP
 #define MIDSTATE_HPP
 
-#include <vector>
-#include <string>
-#include <sstream>
-#include <iomanip>
 #include <cstdint>
-#include <algorithm>
-#include <cstring>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 class MidstateCalculator {
 public:
     struct SHA256State {
         uint32_t h[8];
-        
+
+        // Вывод состояния в формате 8 слов по 32 бита (Big Endian текстовое представление).
         std::string to_hex() const {
             std::stringstream ss;
             for (int i = 0; i < 8; ++i) {
-                // Форматирование как Big Endian слов, типично для отладки midstate
-                // Некоторое оборудование ожидает слова Little Endian. Мы будем придерживаться стандартного вывода BE для читаемости.
                 ss << std::hex << std::setw(8) << std::setfill('0') << h[i];
             }
             return ss.str();
         }
     };
 
-    // Вычисление midstate для первых 64 байт заголовка блока
+    // ---------------------------------------------------------------------------------
+    // calculate_midstate
+    // ---------------------------------------------------------------------------------
+    // Midstate для Bitcoin-майнинга — это состояние SHA-256 после обработки ПЕРВЫХ 64 байт
+    // 80-байтного заголовка блока. Это ровно один блок SHA-256 без финального padding.
+    //
+    // Ключевой момент по endian:
+    // - Заголовок Bitcoin состоит из полей LE (version, prevhash, merkle root, time, bits, nonce).
+    // - Но SHA-256 читает входной поток байтов по 32-битным словам как BIG ENDIAN.
+    // - Значит, нам нужно просто подать байты в правильном порядке заголовка (как собраны в main),
+    //   а внутри SHA-256 слова W[i] формируются как big-endian unpack из этих байтов.
+    // ---------------------------------------------------------------------------------
     static SHA256State calculate_midstate(const std::vector<unsigned char>& data_64_bytes) {
         if (data_64_bytes.size() != 64) {
-             throw std::runtime_error("Для вычисления Midstate требуется ровно 64 байта");
+            throw std::runtime_error("Для вычисления Midstate требуется ровно 64 байта");
         }
 
-        // Начальные значения хэша SHA-256 (Первые 32 бита дробных частей квадратных корней первых 8 простых чисел)
-        uint32_t h[8] = {
-            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-            0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
-        };
+        std::cout << "\n[MIDSTATE] ===== НАЧАЛО РАСЧЁТА MIDSTATE =====\n";
+        std::cout << "[MIDSTATE] Входные 64 байта: " << bytes_to_hex(data_64_bytes) << "\n";
 
-        // Константы (Первые 32 бита дробных частей кубических корней первых 64 простых чисел)
-        static const uint32_t k[64] = {
+        uint32_t state[8] = {
+            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+            0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+
+        static constexpr uint32_t k[64] = {
             0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
             0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
             0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
@@ -47,54 +56,55 @@ public:
             0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
             0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
             0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
-        };
+            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
 
-        // Подготовка информации
-        // 1. Подготовка расписания сообщений (Message Schedule) W[0..63]
-        uint32_t w[64];
-        
-        // Копирование первых 16 слов (64 байта) из данных
-        // Данные обычно строго Big Endian в определении SHA256, 
-        // но заголовки Bitcoin - это структуры полей Little Endian. 
-        // Когда мы передаем 64-байтовый блок, мы ДОЛЖНЫ передавать его точно так, как он находится в памяти.
-        // Алгоритм SHA256 обрабатывает входные данные как поток байтов.
-        // Однако операция "block" читает 32-битные слова в BIG ENDIAN из потока байтов.
-        
+        uint32_t w[64]{};
+
+        // W[0..15] читаем как big-endian слова из байтового потока.
         for (int i = 0; i < 16; ++i) {
-            w[i] = (uint32_t)data_64_bytes[i * 4] << 24 |
-                   (uint32_t)data_64_bytes[i * 4 + 1] << 16 |
-                   (uint32_t)data_64_bytes[i * 4 + 2] << 8 |
-                   (uint32_t)data_64_bytes[i * 4 + 3];
+            w[i] = (static_cast<uint32_t>(data_64_bytes[i * 4]) << 24) |
+                   (static_cast<uint32_t>(data_64_bytes[i * 4 + 1]) << 16) |
+                   (static_cast<uint32_t>(data_64_bytes[i * 4 + 2]) << 8) |
+                   static_cast<uint32_t>(data_64_bytes[i * 4 + 3]);
         }
 
-        // Расширение первых 16 слов в оставшиеся 48 слов w[16..63]
         for (int i = 16; i < 64; ++i) {
-            uint32_t s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
-            uint32_t s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            const uint32_t s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            const uint32_t s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
             w[i] = w[i - 16] + s0 + w[i - 7] + s1;
         }
 
-        // Инициализация рабочих переменных текущим значением хэша
-        uint32_t a = h[0];
-        uint32_t b = h[1];
-        uint32_t c = h[2];
-        uint32_t d = h[3];
-        uint32_t e = h[4];
-        uint32_t f = h[5];
-        uint32_t g = h[6];
-        uint32_t h_var = h[7];
-
-        // Основной цикл функции сжатия
+        std::cout << "[MIDSTATE] Message schedule W[0..63]:\n";
         for (int i = 0; i < 64; ++i) {
-            uint32_t s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
-            uint32_t ch = (e & f) ^ (~e & g);
-            uint32_t temp1 = h_var + s1 + ch + k[i] + w[i];
-            uint32_t s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
-            uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
-            uint32_t temp2 = s0 + maj;
+            std::cout << "  W[" << std::setw(2) << std::setfill('0') << i << "]="
+                      << std::hex << std::setw(8) << std::setfill('0') << w[i] << std::dec;
+            if ((i + 1) % 4 == 0) {
+                std::cout << "\n";
+            } else {
+                std::cout << "  ";
+            }
+        }
 
-            h_var = g;
+        uint32_t a = state[0];
+        uint32_t b = state[1];
+        uint32_t c = state[2];
+        uint32_t d = state[3];
+        uint32_t e = state[4];
+        uint32_t f = state[5];
+        uint32_t g = state[6];
+        uint32_t h = state[7];
+
+        std::cout << "[MIDSTATE] Начальные регистры: " << regs_to_string(a, b, c, d, e, f, g, h) << "\n";
+
+        for (int i = 0; i < 64; ++i) {
+            const uint32_t s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+            const uint32_t ch = (e & f) ^ (~e & g);
+            const uint32_t temp1 = h + s1 + ch + k[i] + w[i];
+            const uint32_t s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+            const uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+            const uint32_t temp2 = s0 + maj;
+
+            h = g;
             g = f;
             f = e;
             e = d + temp1;
@@ -102,25 +112,58 @@ public:
             c = b;
             b = a;
             a = temp1 + temp2;
+
+            std::cout << "[MIDSTATE] Раунд " << std::setw(2) << std::setfill('0') << i
+                      << " | T1=" << std::hex << std::setw(8) << std::setfill('0') << temp1
+                      << " T2=" << std::setw(8) << temp2 << std::dec
+                      << " | " << regs_to_string(a, b, c, d, e, f, g, h) << "\n";
         }
 
-        // Добавление сжатого фрагмента к текущему значению хэша
-        SHA256State state;
-        state.h[0] = h[0] + a;
-        state.h[1] = h[1] + b;
-        state.h[2] = h[2] + c;
-        state.h[3] = h[3] + d;
-        state.h[4] = h[4] + e;
-        state.h[5] = h[5] + f;
-        state.h[6] = h[6] + g;
-        state.h[7] = h[7] + h_var;
+        SHA256State out{};
+        out.h[0] = state[0] + a;
+        out.h[1] = state[1] + b;
+        out.h[2] = state[2] + c;
+        out.h[3] = state[3] + d;
+        out.h[4] = state[4] + e;
+        out.h[5] = state[5] + f;
+        out.h[6] = state[6] + g;
+        out.h[7] = state[7] + h;
 
-        return state;
+        std::cout << "[MIDSTATE] Итоговое состояние (BE words): " << out.to_hex() << "\n";
+        std::cout << "[MIDSTATE] ===== КОНЕЦ РАСЧЁТА MIDSTATE =====\n\n";
+
+        return out;
     }
 
 private:
-    static uint32_t rotr(uint32_t x, uint32_t n) {
-        return (x >> n) | (x << (32 - n));
+    static uint32_t rotr(uint32_t x, uint32_t n) { return (x >> n) | (x << (32 - n)); }
+
+    static std::string bytes_to_hex(const std::vector<unsigned char>& bytes) {
+        std::ostringstream ss;
+        for (unsigned char b : bytes) {
+            ss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
+        }
+        return ss.str();
+    }
+
+    static std::string hex32(uint32_t v) {
+        std::ostringstream ss;
+        ss << std::hex << std::setw(8) << std::setfill('0') << v;
+        return ss.str();
+    }
+
+    static std::string regs_to_string(uint32_t a,
+                                      uint32_t b,
+                                      uint32_t c,
+                                      uint32_t d,
+                                      uint32_t e,
+                                      uint32_t f,
+                                      uint32_t g,
+                                      uint32_t h) {
+        std::ostringstream ss;
+        ss << "a=" << hex32(a) << " b=" << hex32(b) << " c=" << hex32(c) << " d=" << hex32(d)
+           << " e=" << hex32(e) << " f=" << hex32(f) << " g=" << hex32(g) << " h=" << hex32(h);
+        return ss.str();
     }
 };
 
