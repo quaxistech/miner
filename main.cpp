@@ -38,7 +38,6 @@ public:
 
 private:
     static constexpr uint32_t FIXED_BLOCK_VERSION_DEC = 1073733632;
-    static constexpr double FIXED_NETWORK_DIFFICULTY = 146470000000000000.0;
 
     int socket_fd_;
     std::string read_buffer_;
@@ -173,8 +172,7 @@ private:
     void explain_set_difficulty(const json& params) {
         last_pool_difficulty_ = params[0].get<double>();
         std::cout << "Тип: mining.set_difficulty" << std::endl;
-        std::cout << "Сложность от пула (для информации): " << last_pool_difficulty_ << std::endl;
-        std::cout << "Сложность, используемая в расчёте (жёстко): " << FIXED_NETWORK_DIFFICULTY << std::endl;
+        std::cout << "Сложность от пула: " << last_pool_difficulty_ << std::endl;
     }
 
     void explain_mining_notify(const json& params) {
@@ -266,8 +264,13 @@ private:
         auto target_from_nbits = NonceCalculator::target_from_compact(nbits);
         bool valid_vs_nbits = NonceCalculator::hash_meets_target(hash_be, target_from_nbits);
 
-        auto target_from_fixed_diff = NonceCalculator::target_from_difficulty(FIXED_NETWORK_DIFFICULTY);
-        bool valid_vs_fixed_diff = NonceCalculator::hash_meets_target(hash_be, target_from_fixed_diff);
+        bool has_pool_difficulty = last_pool_difficulty_ > 0.0;
+        std::array<unsigned char, 32> target_from_pool_diff{};
+        bool valid_vs_pool_diff = false;
+        if (has_pool_difficulty) {
+            target_from_pool_diff = NonceCalculator::target_from_difficulty(last_pool_difficulty_);
+            valid_vs_pool_diff = NonceCalculator::hash_meets_target(hash_be, target_from_pool_diff);
+        }
 
         std::cout << "[MIDSTATE] " << midstate.to_hex() << std::endl;
         std::cout << "[HASH big-endian] " << NonceCalculator::bytes_to_hex(hash_be) << std::endl;
@@ -277,16 +280,18 @@ private:
                   << (valid_vs_nbits ? "PASS (hash <= target)" : "FAIL (hash > target)") << std::endl;
         std::cout << "[COMPARE nBits] hash=" << NonceCalculator::bytes_to_hex(hash_be)
                   << " VS target=" << NonceCalculator::bytes_to_hex(target_from_nbits) << std::endl;
-
         std::cout << "[FIXED VERSION DEC] " << FIXED_BLOCK_VERSION_DEC << std::endl;
-        std::cout << "[FIXED DIFFICULTY] " << std::fixed << std::setprecision(0) << FIXED_NETWORK_DIFFICULTY
-                  << std::defaultfloat << std::endl;
-        std::cout << "[TARGET from fixed difficulty] " << NonceCalculator::bytes_to_hex(target_from_fixed_diff)
-                  << std::endl;
-        std::cout << "[TARGET CHECK fixed difficulty] "
-                  << (valid_vs_fixed_diff ? "PASS (hash <= target)" : "FAIL (hash > target)") << std::endl;
-        std::cout << "[COMPARE fixed difficulty] hash=" << NonceCalculator::bytes_to_hex(hash_be)
-                  << " VS target=" << NonceCalculator::bytes_to_hex(target_from_fixed_diff) << std::endl;
+
+        if (has_pool_difficulty) {
+            std::cout << "[POOL DIFFICULTY] " << std::fixed << std::setprecision(12) << last_pool_difficulty_
+                      << std::defaultfloat << std::endl;
+            std::cout << "[TARGET from pool difficulty] " << NonceCalculator::bytes_to_hex(target_from_pool_diff)
+                      << std::endl;
+            std::cout << "[TARGET CHECK pool difficulty] "
+                      << (valid_vs_pool_diff ? "PASS (hash <= target)" : "FAIL (hash > target)") << std::endl;
+            std::cout << "[COMPARE pool difficulty] hash=" << NonceCalculator::bytes_to_hex(hash_be)
+                      << " VS target=" << NonceCalculator::bytes_to_hex(target_from_pool_diff) << std::endl;
+        }
     }
 };
 
